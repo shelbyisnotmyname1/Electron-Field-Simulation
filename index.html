@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Electric Field Line Simulator</title>
+  <style>
+    :root {
+      --bg: #f3f5f9;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --line: #d1d5db;
+      --accent: #0f766e;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      color: var(--text);
+      background: radial-gradient(circle at 15% 10%, #ffffff 0%, var(--bg) 55%, #e8edf7 100%);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 12px;
+      height: 100vh;
+      padding: 12px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .panel h1 {
+      margin: 0 0 4px;
+      font-size: 18px;
+    }
+
+    .group { display: flex; flex-direction: column; gap: 6px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .small { font-size: 13px; color: #4b5563; }
+
+    input[type="number"] { width: 88px; padding: 4px 6px; }
+    input[type="range"] { width: 100%; }
+    button {
+      border: 1px solid #c7d2fe;
+      background: #eef2ff;
+      color: #1e3a8a;
+      border-radius: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+    button:hover { background: #e0e7ff; }
+
+    .canvas-wrap {
+      position: relative;
+      background: #ffffff;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #ffffff;
+    }
+
+    .badge {
+      position: absolute;
+      right: 12px;
+      top: 10px;
+      background: rgba(255,255,255,0.92);
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="panel">
+    <h1>Field Lines</h1>
+
+    <div class="group">
+      <label>Charge sign</label>
+      <div class="row">
+        <label><input type="radio" name="sign" value="1" checked> Positive (+)</label>
+        <label><input type="radio" name="sign" value="-1"> Negative (-)</label>
+      </div>
+    </div>
+
+    <div class="group">
+      <label for="magnitude">Charge magnitude |q| (e)</label>
+      <input id="magnitude" type="number" min="1" max="20" value="1">
+    </div>
+
+    <div class="group">
+      <label for="density">Lines per unit charge</label>
+      <input id="density" type="range" min="6" max="24" value="12">
+      <span class="small" id="densityText">12</span>
+    </div>
+
+    <div class="row">
+      <button id="undoBtn" type="button">Undo Last</button>
+      <button id="clearBtn" type="button">Clear All</button>
+      <button id="resetZoomBtn" type="button">Reset Zoom</button>
+    </div>
+
+    <p class="small">Click canvas to place charges. Mouse wheel zooms in/out at cursor.</p>
+    <p class="small" id="status">Charges: 0</p>
+  </aside>
+
+  <main class="canvas-wrap">
+    <canvas id="fieldCanvas"></canvas>
+    <div class="badge" id="zoomBadge">Zoom: 100%</div>
+  </main>
+</div>
+
+<script>
+  const canvas = document.getElementById("fieldCanvas");
+  const ctx = canvas.getContext("2d");
+
+  const magnitudeInput = document.getElementById("magnitude");
+  const densityInput = document.getElementById("density");
+  const densityText = document.getElementById("densityText");
+  const status = document.getElementById("status");
+  const zoomBadge = document.getElementById("zoomBadge");
+
+  const undoBtn = document.getElementById("undoBtn");
+  const clearBtn = document.getElementById("clearBtn");
+  const resetZoomBtn = document.getElementById("resetZoomBtn");
+
+  const charges = [];
+  const chargeRadius = 10;
+  const softeningSq = 100.0;
+
+  let scale = 1.0;
+  let offsetX = 0.0;
+  let offsetY = 0.0;
+  let isPanning = false;
+  let panStartX = 0.0;
+  let panStartY = 0.0;
+  let panOffsetStartX = 0.0;
+  let panOffsetStartY = 0.0;
+
+  function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    redraw();
+  }
+
+  function screenToWorld(sx, sy) {
+    return { x: (sx - offsetX) / scale, y: (sy - offsetY) / scale };
+  }
+
+  function worldToScreen(wx, wy) {
+    return { x: wx * scale + offsetX, y: wy * scale + offsetY };
+  }
+
+  function getSign() {
+    const selected = document.querySelector('input[name="sign"]:checked');
+    return Number(selected ? selected.value : 1);
+  }
+
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  function updateUiText() {
+    densityText.textContent = densityInput.value;
+    status.textContent = `Charges: ${charges.length}`;
+    zoomBadge.textContent = `Zoom: ${Math.round(scale * 100)}%`;
+  }
+
+  function fieldAt(x, y) {
+    let ex = 0;
+    let ey = 0;
+    for (const c of charges) {
+      const dx = x - c.x;
+      const dy = y - c.y;
+      const r2 = dx * dx + dy * dy + softeningSq;
+      const invR3 = 1.0 / (r2 * Math.sqrt(r2));
+      ex += c.q * dx * invR3;
+      ey += c.q * dy * invR3;
+    }
+    return { ex, ey };
+  }
+
+  function findHitCharge(x, y, targetSign, exclude, minDist = 13) {
+    const minDistSq = minDist * minDist;
+    for (const c of charges) {
+      if (c === exclude) continue;
+      if ((c.q > 0) !== (targetSign > 0)) continue;
+      const dx = x - c.x;
+      const dy = y - c.y;
+      if (dx * dx + dy * dy <= minDistSq) return c;
+    }
+    return null;
+  }
+
+  function worldViewportBounds(margin = 20) {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    const p0 = screenToWorld(-margin, -margin);
+    const p1 = screenToWorld(w + margin, h + margin);
+    return {
+      minX: Math.min(p0.x, p1.x),
+      maxX: Math.max(p0.x, p1.x),
+      minY: Math.min(p0.y, p1.y),
+      maxY: Math.max(p0.y, p1.y),
+    };
+  }
+
+  function traceLine(source, x0, y0, direction) {
+    const step = 3.0;
+    const maxSteps = 2000;
+    const path = [{ x: x0, y: y0 }];
+    const targetSign = direction > 0 ? -1 : 1;
+    const bounds = worldViewportBounds(100);
+
+    let x = x0;
+    let y = y0;
+
+    for (let i = 0; i < maxSteps; i += 1) {
+      const { ex, ey } = fieldAt(x, y);
+      const mag = Math.hypot(ex, ey);
+      if (mag < 1e-8) break;
+
+      x += (direction * step * ex) / mag;
+      y += (direction * step * ey) / mag;
+
+      path.push({ x, y });
+
+      if (x < bounds.minX || x > bounds.maxX || y < bounds.minY || y > bounds.maxY) break;
+      if (findHitCharge(x, y, targetSign, source)) break;
+    }
+    return path;
+  }
+
+  function seedCharges() {
+    const positives = charges.filter(c => c.q > 0);
+    const negatives = charges.filter(c => c.q < 0);
+    if (positives.length > 0) return positives.map(c => ({ c, direction: 1 }));
+    return negatives.map(c => ({ c, direction: -1 }));
+  }
+
+  function drawFieldLines() {
+    if (!charges.length) return;
+    const sources = seedCharges();
+
+    ctx.strokeStyle = "#2f2f2f";
+    ctx.lineWidth = 1.0;
+
+    for (const { c, direction } of sources) {
+      const seeds = Math.max(8, Math.abs(c.q) * Number(densityInput.value));
+      const startRadius = chargeRadius + 6;
+
+      for (let i = 0; i < seeds; i += 1) {
+        const angle = (2 * Math.PI * i) / seeds;
+        const sx = c.x + startRadius * Math.cos(angle);
+        const sy = c.y + startRadius * Math.sin(angle);
+        const path = traceLine(c, sx, sy, direction);
+        if (path.length < 2) continue;
+
+        ctx.beginPath();
+        const p0 = worldToScreen(path[0].x, path[0].y);
+        ctx.moveTo(p0.x, p0.y);
+        for (let j = 1; j < path.length; j += 1) {
+          const p = worldToScreen(path[j].x, path[j].y);
+          ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawCharges() {
+    for (const c of charges) {
+      const p = worldToScreen(c.x, c.y);
+      const radius = Math.max(6, chargeRadius * scale);
+      const color = c.q > 0 ? "#d63b3b" : "#2f63d8";
+
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#111827";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `bold ${Math.max(9, 11 * scale)}px Segoe UI`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const sign = c.q > 0 ? "+" : "-";
+      const label = Math.abs(c.q) === 1 ? sign : `${sign}${Math.abs(c.q)}`;
+      ctx.fillText(label, p.x, p.y);
+    }
+  }
+
+  function redraw() {
+    ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+    drawFieldLines();
+    drawCharges();
+    updateUiText();
+  }
+
+  canvas.addEventListener("click", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    const world = screenToWorld(sx, sy);
+
+    const sign = getSign();
+    const magnitude = clamp(Number(magnitudeInput.value) || 1, 1, 20);
+    magnitudeInput.value = String(magnitude);
+    charges.push({ x: world.x, y: world.y, q: sign * magnitude });
+    redraw();
+  });
+
+  canvas.addEventListener("mousedown", (event) => {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    isPanning = true;
+    panStartX = event.clientX - rect.left;
+    panStartY = event.clientY - rect.top;
+    panOffsetStartX = offsetX;
+    panOffsetStartY = offsetY;
+    canvas.style.cursor = "grabbing";
+  });
+
+  window.addEventListener("mousemove", (event) => {
+    if (!isPanning) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    offsetX = panOffsetStartX + (sx - panStartX);
+    offsetY = panOffsetStartY + (sy - panStartY);
+    redraw();
+  });
+
+  window.addEventListener("mouseup", (event) => {
+    if (event.button !== 1 || !isPanning) return;
+    isPanning = false;
+    canvas.style.cursor = "default";
+  });
+
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+
+    const rect = canvas.getBoundingClientRect();
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    const before = screenToWorld(sx, sy);
+
+    const zoomFactor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+    scale = clamp(scale * zoomFactor, 0.25, 6.0);
+
+    offsetX = sx - before.x * scale;
+    offsetY = sy - before.y * scale;
+
+    redraw();
+  }, { passive: false });
+
+  canvas.addEventListener("auxclick", (event) => {
+    if (event.button === 1) event.preventDefault();
+  });
+
+  undoBtn.addEventListener("click", () => {
+    if (charges.length) charges.pop();
+    redraw();
+  });
+
+  clearBtn.addEventListener("click", () => {
+    charges.length = 0;
+    redraw();
+  });
+
+  resetZoomBtn.addEventListener("click", () => {
+    scale = 1.0;
+    offsetX = 0;
+    offsetY = 0;
+    redraw();
+  });
+
+  densityInput.addEventListener("input", redraw);
+  magnitudeInput.addEventListener("change", () => {
+    magnitudeInput.value = String(clamp(Number(magnitudeInput.value) || 1, 1, 20));
+  });
+
+  window.addEventListener("resize", resizeCanvas);
+  resizeCanvas();
+</script>
+</body>
+</html>
